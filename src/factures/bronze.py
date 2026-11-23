@@ -1,14 +1,4 @@
-"""Étape 3 — couche bronze : texte brut extrait de chaque PDF + métadonnées de traçabilité.
-
-Principes :
-- un PDF est identifié par l'empreinte SHA-256 de son contenu (pas par son nom) ;
-- incrémental : un PDF déjà ingéré avec succès n'est jamais retraité ni ré-OCRisé ;
-- si l'OCR échoue, l'erreur est enregistrée et le PDF sera retenté au prochain lancement ;
-- la couche bronze est en ajout seul : chaque exécution écrit un NOUVEAU fichier
-  Parquet dans le bucket, on ne modifie ni ne supprime jamais les fichiers existants.
-"""
-
-from __future__ import annotations
+"""Étape 3 : couche bronze (texte brut extrait de chaque PDF et métadonnées)."""
 
 import hashlib
 import io
@@ -23,28 +13,28 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pymupdf
 
-from .config import LANDING_DIR, S3Target
+from .config import LANDING_DIR, S3Target, variable
 from .detect import classify_pdf
 from .ocr import TAILLE_MAX_PX, ocr_page
 from .storage import list_objects, s3_client
 
-PREFIXE = "documents/"  # dossier des fichiers Parquet dans le bucket bronze
+PREFIXE = "documents/"
 
 SCHEMA = pa.schema(
     [
-        ("sha256", pa.string()),  # identifiant du document (empreinte du contenu)
-        ("fichier", pa.string()),  # nom du PDF
-        ("s3_uri", pa.string()),  # emplacement d'origine dans le bucket source
+        ("sha256", pa.string()),
+        ("fichier", pa.string()),
+        ("s3_uri", pa.string()),
         ("s3_etag", pa.string()),
         ("taille_octets", pa.int64()),
-        ("type_pdf", pa.string()),  # "texte" ou "image" (étape 1)
-        ("methode", pa.string()),  # "couche_texte" ou "ocr"
-        ("modele_ocr", pa.string()),  # nom du modèle si OCR
-        ("taille_image_px", pa.int32()),  # résolution envoyée à l'OCR
-        ("texte", pa.string()),  # texte brut extrait
-        ("duree_s", pa.float64()),  # temps d'extraction
-        ("statut", pa.string()),  # "ok" ou "erreur"
-        ("erreur", pa.string()),  # message d'erreur si statut = erreur
+        ("type_pdf", pa.string()),
+        ("methode", pa.string()),
+        ("modele_ocr", pa.string()),
+        ("taille_image_px", pa.int32()),
+        ("texte", pa.string()),
+        ("duree_s", pa.float64()),
+        ("statut", pa.string()),
+        ("erreur", pa.string()),
         ("ingere_le", pa.timestamp("us", tz="UTC")),
     ]
 )
@@ -66,13 +56,13 @@ def lire_bronze(target: S3Target) -> pa.Table:
 
 
 def deja_ingeres(target: S3Target) -> set[str]:
-    """Renvoie les empreintes des PDF déjà ingérés avec succès (statut ok)."""
+    """Renvoie les empreintes des PDF déjà ingérés avec succès."""
     table = lire_bronze(target).to_pylist()
     return {ligne["sha256"] for ligne in table if ligne["statut"] == "ok"}
 
 
 def extraire(path: Path, type_pdf: str) -> dict:
-    """Extrait le texte d'un PDF : couche texte si possible, sinon OCR. Ne lève pas d'erreur."""
+    """Extrait le texte d'un PDF (couche texte ou OCR) et enregistre l'erreur éventuelle."""
     ligne = {"methode": None, "modele_ocr": None, "taille_image_px": None,
              "texte": None, "duree_s": None, "statut": "ok", "erreur": None}
     try:
@@ -89,15 +79,15 @@ def extraire(path: Path, type_pdf: str) -> dict:
                 texte, d = ocr_page(path, num, TAILLE_MAX_PX)
                 textes.append(texte)
                 duree += d
-            ligne.update(methode="ocr", modele_ocr=os.environ["OCR_MODEL"],
+            ligne.update(methode="ocr", modele_ocr=variable("OCR_MODEL"),
                          taille_image_px=TAILLE_MAX_PX, texte="\n\n".join(textes), duree_s=duree)
-    except Exception as e:  # OCR indisponible, PDF illisible… on trace et on continue
+    except Exception as e:
         ligne.update(statut="erreur", erreur=f"{type(e).__name__}: {e}"[:500])
     return ligne
 
 
 def traiter_pdf(path: Path, empreinte: str, infos_s3: dict) -> dict:
-    """Extrait le texte d'un PDF et construit sa ligne bronze (métadonnées + texte)."""
+    """Extrait le texte d'un PDF et construit sa ligne bronze."""
     type_pdf = classify_pdf(path)["type"]
     s3 = infos_s3.get(path.name, {})
     ligne = {
@@ -110,30 +100,29 @@ def traiter_pdf(path: Path, empreinte: str, infos_s3: dict) -> dict:
         **extraire(path, type_pdf),
         "ingere_le": datetime.now(timezone.utc),
     }
-    print(f"  {ligne['statut']:<6} {ligne['methode'] or '-':<12} {path.name}"
-          + (f"  ({ligne['erreur'][:80]})" if ligne["erreur"] else ""), flush=True)
+    message = f"  {ligne['statut']:<6} {ligne['methode'] or '-':<12} {path.name}"
+    if ligne["erreur"]:
+        message += f"  ({ligne['erreur'][:80]})"
+    print(message, flush=True)
     return ligne
 
 
-def ingerer(dossier: Path = LANDING_DIR) -> dict:
+def ingerer() -> dict:
     """Ingère dans la couche bronze les PDF de la zone d'arrivée pas encore traités."""
     target = S3Target.from_env("BRONZE")
     deja = deja_ingeres(target)
-    manifeste = json.loads((dossier / "_manifest.json").read_text())
+    manifeste = json.loads((LANDING_DIR / "_manifest.json").read_text())
     infos_s3 = {v["local_path"]: v for v in manifeste.values()}
 
-    # 1) Sélection des PDF à traiter (rapide) : on écarte ceux déjà ingérés
     a_traiter, stats = [], {"ignores": 0, "ok": 0, "erreurs": 0}
-    for path in sorted(dossier.glob("*.pdf")):
+    for path in sorted(LANDING_DIR.glob("*.pdf")):
         empreinte = sha256_fichier(path)
         if empreinte in deja:
             stats["ignores"] += 1
             continue
-        deja.add(empreinte)  # évite un doublon si le même PDF est présent sous 2 noms
+        deja.add(empreinte)
         a_traiter.append((path, empreinte))
 
-    # 2) Extraction en parallèle : l'OCR (~7 s/page) attend surtout le réseau et le GPU distant,
-    #    donc plusieurs appels simultanés divisent le temps total.
     parallelisme = int(os.getenv("OCR_PARALLELISME", "4"))
     with ThreadPoolExecutor(max_workers=parallelisme) as pool:
         lignes = list(pool.map(lambda pe: traiter_pdf(pe[0], pe[1], infos_s3), a_traiter))
@@ -153,4 +142,4 @@ def ecrire_lot(target: S3Target, lignes: list[dict]) -> None:
     horodatage = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     cle = f"{PREFIXE}lot_{horodatage}.parquet"
     s3_client(target).put_object(Bucket=target.bucket, Key=cle, Body=buffer.getvalue())
-    print(f"→ {len(lignes)} lignes écrites dans s3://{target.bucket}/{cle}")
+    print(f"{len(lignes)} lignes écrites dans s3://{target.bucket}/{cle}")

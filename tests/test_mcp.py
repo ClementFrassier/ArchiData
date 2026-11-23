@@ -1,12 +1,4 @@
-"""Test du serveur MCP : appelle chaque outil comme un vrai client MCP et vérifie les résultats.
-
-Lancement : uv run python tests/test_mcp.py
-
-Les valeurs attendues sont calculées séparément, par des requêtes SQL directes sur
-l'entrepôt, puis comparées aux réponses du serveur.
-"""
-
-from __future__ import annotations
+"""Test du serveur MCP (lancement : uv run python tests/test_mcp.py)."""
 
 import asyncio
 import json
@@ -24,7 +16,7 @@ RESULTATS = []
 def verifier(nom: str, condition: bool, detail: str = "") -> None:
     """Enregistre et affiche le résultat d'une vérification."""
     RESULTATS.append(condition)
-    print(f"  {'OK   ' if condition else 'ÉCHEC'} {nom}" + (f" — {detail}" if detail and not condition else ""))
+    print(f"  {'OK   ' if condition else 'ÉCHEC'} {nom}" + (f" : {detail}" if detail and not condition else ""))
 
 
 async def appeler(session: ClientSession, outil: str, **arguments) -> dict:
@@ -35,7 +27,7 @@ async def appeler(session: ClientSession, outil: str, **arguments) -> dict:
 
 async def tester() -> None:
     """Démarre le serveur MCP, appelle chaque outil et vérifie les réponses."""
-    attendu = connexion()  # connexion directe, indépendante du serveur, pour les valeurs attendues
+    attendu = connexion()
     fichiers_avant = sorted(o["Key"] for o in list_objects(S3Target.from_env("SILVER")))
 
     serveur = StdioServerParameters(command="uv", args=["run", "factures-mcp"])
@@ -52,32 +44,32 @@ async def tester() -> None:
             r = await appeler(session, "lister_factures", fournisseur="aubry", statut_paiement="En retard")
             n = attendu.execute("SELECT count(*) FROM silver.factures WHERE fournisseur ILIKE '%aubry%' "
                             "AND statut_paiement = 'En retard'").fetchone()[0]
-            verifier("filtre fournisseur + statut", r["nombre_renvoye"] == n, f"{r['nombre_renvoye']} ≠ {n}")
+            verifier("filtre fournisseur + statut", r["nombre_renvoye"] == n, f"{r['nombre_renvoye']} != {n}")
             verifier("SQL exécuté renvoyé", "silver.factures" in r["sql"][0])
             verifier("filtres passés en paramètres", "aubry" not in r["sql"][0] and "%aubry%" in r["parametres"])
             r = await appeler(session, "lister_factures", date_debut="2026-01-01", date_fin="2026-03-31")
             n = attendu.execute("SELECT count(*) FROM silver.factures WHERE date_emission "
                             "BETWEEN '2026-01-01' AND '2026-03-31'").fetchone()[0]
-            verifier("filtre période", r["nombre_renvoye"] == n, f"{r['nombre_renvoye']} ≠ {n}")
+            verifier("filtre période", r["nombre_renvoye"] == n, f"{r['nombre_renvoye']} != {n}")
 
             print("totaux_factures")
             r = await appeler(session, "totaux_factures", statut_paiement="En retard",
                               date_debut="2025-01-01", date_fin="2025-12-31")
             nb, ttc = attendu.execute("SELECT count(*), sum(total_ttc) FROM silver.factures WHERE statut_paiement = "
                                   "'En retard' AND year(date_emission) = 2025").fetchone()
-            verifier("nombre (en retard, 2025)", r["nombre_factures"] == nb, f"{r['nombre_factures']} ≠ {nb}")
-            verifier("total TTC exact", r["total_ttc"] == str(ttc), f"{r['total_ttc']} ≠ {ttc}")
+            verifier("nombre (en retard, 2025)", r["nombre_factures"] == nb, f"{r['nombre_factures']} != {nb}")
+            verifier("total TTC exact", r["total_ttc"] == str(ttc), f"{r['total_ttc']} != {ttc}")
             r = await appeler(session, "totaux_factures", client="client_qui_n_existe_pas")
-            verifier("aucun résultat → 0", r["nombre_factures"] == 0 and r["total_ttc"] == "0.00", str(r))
+            verifier("aucun résultat, total à 0", r["nombre_factures"] == 0 and r["total_ttc"] == "0.00", str(r))
 
             print("detail_facture")
             r = await appeler(session, "detail_facture", numero_facture="A-2025-0001")
             n = attendu.execute("SELECT count(*) FROM silver.lignes_facture WHERE numero_facture = 'A-2025-0001'").fetchone()[0]
             verifier("en-tête de la facture", r["facture"]["numero_facture"] == "A-2025-0001")
-            verifier("lignes de la facture", len(r["lignes"]) == n, f"{len(r['lignes'])} ≠ {n}")
+            verifier("lignes de la facture", len(r["lignes"]) == n, f"{len(r['lignes'])} != {n}")
             verifier("2 requêtes SQL renvoyées", len(r["sql"]) == 2)
             r = await appeler(session, "detail_facture", numero_facture="ZZ-0000")
-            verifier("numéro inconnu → erreur explicite", "erreur" in r and "conseil" in r)
+            verifier("numéro inconnu, erreur avec conseil", "erreur" in r and "conseil" in r)
 
             print("schema_donnees")
             r = await appeler(session, "schema_donnees")
@@ -90,7 +82,7 @@ async def tester() -> None:
                               sql="SELECT categorie, count(*) AS n FROM silver.factures GROUP BY categorie ORDER BY n DESC")
             verifier("SELECT autorisé", r.get("lignes") and r["lignes"][0]["categorie"] == "Informatique", str(r)[:200])
             r = await appeler(session, "requete_sql", sql="SELECT colonne_inexistante FROM silver.factures")
-            verifier("erreur SQL → message + conseil", "erreur" in r and "conseil" in r)
+            verifier("erreur SQL, message et conseil", "erreur" in r and "conseil" in r)
 
             print("requete_sql (tentatives de modification : toutes doivent être refusées)")
             attaques = {

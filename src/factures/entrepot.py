@@ -1,20 +1,4 @@
-"""Étape 6 — l'entrepôt de données : rendre bronze et silver interrogeables en SQL.
-
-Séparation stockage / calcul :
-- STOCKAGE : les fichiers Parquet dans les buckets S3 (un seul exemplaire des données) ;
-- CALCUL   : DuckDB, un moteur SQL qui lit ces fichiers à la demande. L'entrepôt ne
-  contient que des VUES (des requêtes enregistrées), aucune donnée copiée.
-
-Chaque programme ouvre sa propre connexion DuckDB en mémoire : il n'y a pas de
-fichier de base partagé, donc pas de verrou. Plusieurs programmes (et DBeaver)
-peuvent interroger les mêmes données en même temps sans se bloquer.
-
-Les vues pointent vers des adresses s3://… et non vers des chemins locaux : elles
-restent valides sur n'importe quelle machine, dans un conteneur ou chez un collègue,
-du moment que les identifiants sont dans son .env.
-"""
-
-from __future__ import annotations
+"""Étape 6 : entrepôt DuckDB, avec des vues SQL sur les fichiers Parquet de S3."""
 
 import duckdb
 
@@ -33,7 +17,7 @@ def sql_secret(nom: str, target: S3Target) -> str:
 
 
 def sql_vues(bronze: S3Target, silver: S3Target) -> list[str]:
-    """Génère les instructions SQL qui créent les vues bronze.* et silver.* sur les fichiers S3."""
+    """Génère les instructions SQL qui créent les vues bronze et silver sur les fichiers S3."""
     b, s = f"s3://{bronze.bucket}", f"s3://{silver.bucket}"
     return [
         "CREATE SCHEMA IF NOT EXISTS bronze",
@@ -46,7 +30,7 @@ def sql_vues(bronze: S3Target, silver: S3Target) -> list[str]:
 
 
 def script_initialisation() -> list[str]:
-    """Renvoie toutes les instructions SQL pour préparer une connexion (extension, clés, vues)."""
+    """Renvoie les instructions SQL qui préparent une connexion (extension, clés, vues)."""
     bronze, silver = S3Target.from_env("BRONZE"), S3Target.from_env("SILVER")
     return [
         "INSTALL httpfs",

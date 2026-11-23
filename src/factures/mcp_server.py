@@ -1,22 +1,4 @@
-"""Étape 7 — serveur MCP : donner à une IA un accès en LECTURE SEULE à l'entrepôt.
-
-Outils exposés :
-- lister_factures   : liste filtrée (fournisseur, client, statut, catégorie, période…)
-- totaux_factures   : nombre et totaux HT / TVA / TTC avec les mêmes filtres
-- detail_facture    : une facture et ses lignes
-- schema_donnees    : tables, colonnes et types disponibles
-- requete_sql       : requête SQL libre, en lecture seule
-
-Chaque réponse contient la clé "sql" : les requêtes réellement exécutées.
-
-Sécurité (les arguments viennent d'un LLM, donc d'une source non fiable) :
-1. les filtres sont passés en PARAMÈTRES ($1, $2…) et jamais collés dans le texte SQL ;
-2. la requête libre est analysée par DuckDB : une seule instruction, de type SELECT ;
-3. DuckDB est verrouillé : aucun accès aux fichiers locaux ni à d'autres URL que nos
-   buckets, et la configuration ne peut plus être modifiée.
-"""
-
-from __future__ import annotations
+"""Étape 7 : serveur MCP en lecture seule sur l'entrepôt."""
 
 import datetime
 import decimal
@@ -28,7 +10,7 @@ from mcp.server.mcpserver import MCPServer
 from .config import S3Target
 from .entrepot import connexion
 
-LIMITE_MAX = 200  # nombre maximum de lignes renvoyées au LLM
+LIMITE_MAX = 200
 MOTS_INTERDITS = re.compile(r"duckdb_secrets|which_secret|duckdb_settings", re.IGNORECASE)
 
 mcp = MCPServer("factures")
@@ -36,22 +18,22 @@ _con: duckdb.DuckDBPyConnection | None = None
 
 
 def base() -> duckdb.DuckDBPyConnection:
-    """Ouvre (une seule fois) la connexion à l'entrepôt, puis la verrouille."""
+    """Ouvre une seule fois la connexion à l'entrepôt, puis bloque l'accès aux fichiers et la configuration."""
     global _con
     if _con is None:
         _con = connexion()
         buckets = [S3Target.from_env(p).bucket for p in ("BRONZE", "SILVER")]
         liste = ", ".join(f"'s3://{b}/'" for b in buckets)
         _con.execute(f"SET allowed_directories = [{liste}]")
-        _con.execute("SET enable_external_access = false")  # plus de fichiers locaux ni d'autres URL
-        _con.execute("SET lock_configuration = true")  # ces réglages ne peuvent plus être changés
+        _con.execute("SET enable_external_access = false")
+        _con.execute("SET lock_configuration = true")
     return _con
 
 
 def en_json(valeur):
     """Convertit les décimaux et les dates en texte pour la réponse JSON."""
     if isinstance(valeur, decimal.Decimal):
-        return str(valeur)  # texte exact, pas de float
+        return str(valeur)
     if isinstance(valeur, (datetime.date, datetime.datetime)):
         return valeur.isoformat()
     return valeur
@@ -59,7 +41,7 @@ def en_json(valeur):
 
 def executer(sql: str, params: list | None = None, limite: int = LIMITE_MAX) -> list[dict]:
     """Exécute une requête paramétrée et renvoie les lignes sous forme de dictionnaires."""
-    cur = base().cursor()  # un curseur par appel : plusieurs outils peuvent tourner en parallèle
+    cur = base().cursor()
     cur.execute(sql, params or [])
     colonnes = [d[0] for d in cur.description]
     return [{c: en_json(v) for c, v in zip(colonnes, ligne)} for ligne in cur.fetchmany(limite)]
@@ -89,7 +71,7 @@ def construire_filtres(fournisseur, client, statut_paiement, statut_qualite,
 
 
 def erreur(message: str, sql: str | None, conseil: str) -> dict:
-    """Formate une erreur que le LLM peut comprendre pour corriger son appel."""
+    """Formate une erreur avec un conseil pour que le LLM puisse corriger son appel."""
     return {"erreur": message, "sql": [sql] if sql else [], "conseil": conseil}
 
 
@@ -104,17 +86,16 @@ def lister_factures(
     date_fin: str | None = None,
     limite: int = 50,
 ) -> dict:
-    """Liste les factures (une ligne par facture) avec des filtres optionnels.
+    """Liste les factures, une ligne par facture, avec des filtres optionnels.
 
-    Utiliser pour afficher ou parcourir des factures. Pour un nombre ou une somme,
-    préférer totaux_factures.
-    - fournisseur, client : recherche partielle, insensible à la casse (ex. "aubry")
-    - statut_paiement : "Payée", "En retard" ou "En attente"
-    - statut_qualite : "valide" ou "signalee" (montants incohérents)
-    - categorie : "Informatique", "Fournitures", "Maintenance" ou "Conseil"
-    - date_debut, date_fin : période sur la date d'émission, format AAAA-MM-JJ
-    - limite : nombre maximum de factures renvoyées (1 à 200)
-    Les montants sont en euros, sous forme de texte exact (ex. "36973.80").
+    À utiliser pour afficher des factures. Pour un nombre ou une somme, utiliser totaux_factures.
+    fournisseur, client : recherche partielle, sans tenir compte des majuscules (ex. "aubry").
+    statut_paiement : "Payée", "En retard" ou "En attente".
+    statut_qualite : "valide" ou "signalee" (montants incohérents).
+    categorie : "Informatique", "Fournitures", "Maintenance" ou "Conseil".
+    date_debut, date_fin : période sur la date d'émission, au format AAAA-MM-JJ.
+    limite : nombre maximum de factures renvoyées, entre 1 et 200.
+    Les montants sont en euros, sous forme de texte (ex. "36973.80").
     """
     where, params = construire_filtres(fournisseur, client, statut_paiement, statut_qualite,
                                        categorie, date_debut, date_fin)
@@ -138,16 +119,16 @@ def totaux_factures(
     date_debut: str | None = None,
     date_fin: str | None = None,
 ) -> dict:
-    """Calcule le NOMBRE de factures et la SOMME des montants HT, TVA et TTC (en euros).
+    """Calcule le nombre de factures et la somme des montants HT, TVA et TTC, en euros.
 
-    Utiliser pour toute question « combien », « quel montant », « quel total ».
+    À utiliser pour les questions « combien », « quel montant » ou « quel total ».
     Mêmes filtres que lister_factures :
-    - fournisseur, client : recherche partielle, insensible à la casse
-    - statut_paiement : "Payée", "En retard" ou "En attente"
-    - statut_qualite : "valide" ou "signalee"
-    - categorie : "Informatique", "Fournitures", "Maintenance" ou "Conseil"
-    - date_debut, date_fin : période sur la date d'émission, format AAAA-MM-JJ
-      (ex. toute l'année 2025 : date_debut="2025-01-01", date_fin="2025-12-31")
+    fournisseur, client : recherche partielle, sans tenir compte des majuscules.
+    statut_paiement : "Payée", "En retard" ou "En attente".
+    statut_qualite : "valide" ou "signalee".
+    categorie : "Informatique", "Fournitures", "Maintenance" ou "Conseil".
+    date_debut, date_fin : période sur la date d'émission, au format AAAA-MM-JJ
+    (pour l'année 2025 : date_debut="2025-01-01", date_fin="2025-12-31").
     """
     where, params = construire_filtres(fournisseur, client, statut_paiement, statut_qualite,
                                        categorie, date_debut, date_fin)
@@ -163,9 +144,9 @@ def totaux_factures(
 
 @mcp.tool()
 def detail_facture(numero_facture: str) -> dict:
-    """Renvoie le détail complet d'UNE facture (en-tête, statut de qualité) et ses lignes d'articles.
+    """Renvoie le détail d'une facture (en-tête et statut de qualité) et ses lignes d'articles.
 
-    - numero_facture : numéro exact, par exemple "A-2025-0001"
+    numero_facture : numéro exact, par exemple "A-2025-0001".
     """
     sql_facture = "SELECT * FROM silver.factures WHERE numero_facture = $1"
     sql_lignes = ("SELECT num_ligne, designation, quantite, prix_unitaire_ht, taux_tva, total_ht "
@@ -173,7 +154,7 @@ def detail_facture(numero_facture: str) -> dict:
     facture = executer(sql_facture, [numero_facture])
     if not facture:
         return erreur(f"Aucune facture avec le numéro {numero_facture!r}.", sql_facture,
-                      "Utilisez lister_factures pour retrouver le numéro exact (format ex. A-2025-0001).")
+                      "Utilisez lister_factures pour retrouver le numéro exact (ex. A-2025-0001).")
     lignes = executer(sql_lignes, [numero_facture])
     return {"facture": facture[0], "lignes": lignes, "sql": [sql_facture, sql_lignes],
             "parametres": [numero_facture]}
@@ -186,7 +167,7 @@ def schema_donnees() -> dict:
     À appeler avant d'écrire une requête avec requete_sql.
     Tables : silver.factures (une ligne par facture), silver.lignes_facture (articles,
     jointure sur numero_facture), silver.quarantaine (documents rejetés),
-    bronze.documents (texte brut extrait et traçabilité).
+    bronze.documents (texte brut extrait).
     """
     sql = ("SELECT table_schema || '.' || table_name AS table_nom, column_name AS colonne, "
            "data_type AS type FROM information_schema.columns "
@@ -199,17 +180,17 @@ def schema_donnees() -> dict:
 
 @mcp.tool()
 def requete_sql(sql: str) -> dict:
-    """Exécute une requête SQL LIBRE en LECTURE SEULE (dialecte DuckDB) et renvoie au plus 200 lignes.
+    """Exécute une requête SQL en lecture seule (syntaxe DuckDB) et renvoie au plus 200 lignes.
 
-    À utiliser seulement si les autres outils ne suffisent pas (regroupements, jointures…).
-    Une seule instruction SELECT (ou WITH … SELECT) est acceptée ; toute modification est refusée.
+    À utiliser seulement si les autres outils ne suffisent pas (regroupements, jointures).
+    Une seule instruction SELECT est acceptée, toute modification est refusée.
     Appeler schema_donnees d'abord pour connaître les tables et les colonnes.
     Exemple : SELECT categorie, sum(total_ttc) FROM silver.factures GROUP BY categorie
     """
     try:
         instructions = base().extract_statements(sql)
     except duckdb.Error as e:
-        return erreur(f"Requête SQL invalide : {e}", sql, "Corrigez la syntaxe (dialecte DuckDB).")
+        return erreur(f"Requête SQL invalide : {e}", sql, "Corrigez la syntaxe (syntaxe DuckDB).")
     if len(instructions) != 1:
         return erreur("Une seule instruction SQL est autorisée.", sql, "Retirez les « ; » en trop.")
     if instructions[0].type != duckdb.StatementType.SELECT:
@@ -217,7 +198,7 @@ def requete_sql(sql: str) -> dict:
                       "Seules les requêtes SELECT sont autorisées.")
     if MOTS_INTERDITS.search(sql):
         return erreur("Accès aux informations internes de DuckDB refusé.", sql,
-                      "Interrogez uniquement les tables bronze.* et silver.*.")
+                      "Interrogez uniquement les tables bronze et silver.")
     try:
         lignes = executer(sql)
     except duckdb.Error as e:
@@ -226,5 +207,5 @@ def requete_sql(sql: str) -> dict:
 
 
 def main() -> None:
-    """Démarre le serveur MCP (communication par l'entrée/sortie standard)."""
+    """Démarre le serveur MCP (communication par l'entrée et la sortie standard)."""
     mcp.run()

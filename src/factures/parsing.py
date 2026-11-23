@@ -1,15 +1,4 @@
-"""Étape 4a — transformer le texte brut d'une facture en champs structurés.
-
-Le texte d'un PDF natif et celui de l'OCR n'ont pas la même forme :
-- natif : une valeur par ligne (libellé puis montant sur la ligne suivante) ;
-- OCR   : Markdown (gras **, titres #, séparateurs ---) et tableaux en HTML.
-
-Stratégie : on NORMALISE d'abord le texte (on retire la mise en forme et on met
-une cellule de tableau par ligne) pour obtenir la même forme dans les deux cas,
-puis un seul parseur lit les champs.
-"""
-
-from __future__ import annotations
+"""Étape 4 : lecture des champs d'une facture à partir de son texte (natif ou OCR)."""
 
 import re
 from datetime import date, datetime
@@ -20,14 +9,14 @@ MONTANT_RE = re.compile(r"^-?\d{1,3}(?: \d{3})*,\d{2} ?€?$")
 
 
 def normaliser(texte: str) -> list[str]:
-    """Retire la mise en forme Markdown/HTML et renvoie la liste des lignes utiles."""
-    texte = texte.replace(" ", " ").replace(" ", " ")  # espaces insécables
-    texte = re.sub(r"</t[dh]>", "\n", texte)  # chaque cellule de tableau → une ligne
-    texte = re.sub(r"<[^>]+>", "", texte)  # supprime les autres balises HTML
-    texte = texte.replace("**", "")  # supprime le gras Markdown
+    """Retire la mise en forme Markdown et HTML et renvoie la liste des lignes utiles."""
+    texte = texte.replace(" ", " ").replace(" ", " ")
+    texte = re.sub(r"</t[dh]>", "\n", texte)
+    texte = re.sub(r"<[^>]+>", "", texte)
+    texte = texte.replace("**", "")
     lignes = []
     for ligne in texte.splitlines():
-        ligne = re.sub(r"^#+\s*", "", ligne)  # supprime les titres Markdown
+        ligne = re.sub(r"^#+\s*", "", ligne)
         ligne = re.sub(r"\s+", " ", ligne).strip()
         if ligne and ligne != "---":
             lignes.append(ligne)
@@ -35,7 +24,7 @@ def normaliser(texte: str) -> list[str]:
 
 
 def lire_montant(valeur: str | None) -> Decimal | None:
-    """Convertit « 1 541,05 € » en Decimal('1541.05') ; None si le format est invalide."""
+    """Convertit « 1 541,05 € » en Decimal('1541.05'), ou None si le format est invalide."""
     if valeur is None:
         return None
     valeur = valeur.strip()
@@ -45,7 +34,7 @@ def lire_montant(valeur: str | None) -> Decimal | None:
 
 
 def lire_date(valeur: str | None) -> date | None:
-    """Convertit « 29/04/2025 » en date ; None si la date est absente ou invalide."""
+    """Convertit « 29/04/2025 » en date, ou None si la date est absente ou invalide."""
     try:
         return datetime.strptime(valeur.strip(), "%d/%m/%Y").date()
     except (AttributeError, ValueError):
@@ -63,7 +52,7 @@ def lire_champ(lignes: list[str], libelle: str) -> str | None:
 
 
 def lire_total(lignes: list[str], libelle: str) -> Decimal | None:
-    """Lit un total (« Total HT 30 811,50 € » sur une ligne, ou montant sur la ligne suivante)."""
+    """Lit un total, avec le montant sur la même ligne ou sur la ligne suivante."""
     trouve = None
     for i, ligne in enumerate(lignes):
         if not ligne.startswith(libelle):
@@ -72,7 +61,7 @@ def lire_total(lignes: list[str], libelle: str) -> Decimal | None:
         suivante = lignes[i + 1] if i + 1 < len(lignes) else None
         montant = lire_montant(reste) if reste else lire_montant(suivante)
         if montant is not None:
-            trouve = montant  # on garde la dernière occurrence (l'en-tête du tableau n'a pas de montant)
+            trouve = montant
     return trouve
 
 
@@ -82,19 +71,21 @@ def lire_lignes_facture(lignes: list[str]) -> list[dict]:
         if lignes[debut:debut + len(ENTETE_TABLEAU)] == ENTETE_TABLEAU:
             break
     else:
-        return []  # en-tête introuvable
+        return []
 
     resultat = []
     i = debut + len(ENTETE_TABLEAU)
     while i + 5 <= len(lignes) and not lignes[i].startswith(("Total ", "TVA ", "Mode de paiement")):
         designation, qte, pu, tva, total = lignes[i:i + 5]
+        taux = None
+        if re.fullmatch(r"\d+(?:,\d+)? ?%", tva):
+            taux = Decimal(tva.replace("%", "").replace(",", ".").strip())
         resultat.append(
             {
                 "designation": designation,
                 "quantite": int(qte) if qte.isdigit() else None,
                 "prix_unitaire_ht": lire_montant(pu),
-                "taux_tva": Decimal(tva.replace("%", "").replace(",", ".").strip())
-                if re.fullmatch(r"\d+(?:,\d+)? ?%", tva) else None,
+                "taux_tva": taux,
                 "total_ht": lire_montant(total),
             }
         )
@@ -103,7 +94,7 @@ def lire_lignes_facture(lignes: list[str]) -> list[dict]:
 
 
 def lire_fournisseur(lignes: list[str]) -> str | None:
-    """Le nom du fournisseur est la première ligne qui n'est pas le titre « FACTURE »."""
+    """Renvoie le nom du fournisseur : la première ligne qui n'est pas le titre « FACTURE »."""
     for ligne in lignes:
         if ligne.upper() != "FACTURE":
             return ligne
@@ -113,7 +104,6 @@ def lire_fournisseur(lignes: list[str]) -> str | None:
 def parser_facture(texte: str) -> dict:
     """Extrait tous les champs d'une facture à partir de son texte brut."""
     lignes = normaliser(texte)
-    statut = lire_champ(lignes, "Statut")
     return {
         "numero_facture": lire_champ(lignes, "Numéro de facture"),
         "fournisseur": lire_fournisseur(lignes),
@@ -124,7 +114,7 @@ def parser_facture(texte: str) -> dict:
         "date_emission": lire_date(lire_champ(lignes, "Date d'émission")),
         "date_echeance": lire_date(lire_champ(lignes, "Date d'échéance")),
         "categorie": lire_champ(lignes, "Catégorie"),
-        "statut_paiement": statut,
+        "statut_paiement": lire_champ(lignes, "Statut"),
         "mode_paiement": lire_champ(lignes, "Mode de paiement"),
         "iban": lire_champ(lignes, "IBAN"),
         "total_ht": lire_total(lignes, "Total HT"),

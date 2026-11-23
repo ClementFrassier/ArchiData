@@ -1,10 +1,4 @@
-"""Étape 1b — déterminer si un PDF est « texte » (couche texte) ou « image » (OCR nécessaire).
-
-On lit la couche texte avec PyMuPDF et on compte les caractères alphanumériques.
-Un PDF scanné n'est qu'une image : sa couche texte est vide.
-"""
-
-from __future__ import annotations
+"""Étape 1 : détection des PDF texte et des PDF image."""
 
 import csv
 from pathlib import Path
@@ -13,7 +7,6 @@ import pymupdf
 
 from .config import LANDING_DIR
 
-# En dessous de ce nombre de caractères, le PDF n'a pas de texte exploitable.
 MIN_CARACTERES = 30
 
 
@@ -29,10 +22,10 @@ def classify_pdf(path: Path) -> dict:
     }
 
 
-def detect_all(folder: Path = LANDING_DIR) -> list[dict]:
+def detect_all() -> list[dict]:
     """Classe tous les PDF de la zone d'arrivée et écrit le résultat dans detection.csv."""
-    results = [classify_pdf(p) for p in sorted(folder.glob("*.pdf"))]
-    with (folder / "detection.csv").open("w", newline="") as f:
+    results = [classify_pdf(p) for p in sorted(LANDING_DIR.glob("*.pdf"))]
+    with (LANDING_DIR / "detection.csv").open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=["fichier", "caracteres", "type"])
         writer.writeheader()
         writer.writerows(results)

@@ -1,21 +1,4 @@
-"""Étape 4b — couche silver : tables propres, typées et contrôlées.
-
-La couche silver est entièrement RECALCULÉE à partir de la couche bronze à chaque
-lancement (sans refaire d'OCR) : si on corrige le parseur ou une règle de qualité,
-il suffit de relancer.
-
-Trois tables Parquet sont écrites dans le bucket silver :
-- factures        : une ligne par facture acceptée, avec son statut de qualité ;
-- lignes_facture  : une ligne par article facturé ;
-- quarantaine     : les documents rejetés, avec le motif du rejet.
-
-Rejetée  = document inexploitable (champ obligatoire illisible, doublon…) → quarantaine.
-Signalée = facture exploitable mais suspecte (montants incohérents…) → gardée en silver
-           avec statut_qualite = "signalee" et la liste des anomalies, à vérifier par un humain.
-On ne corrige JAMAIS automatiquement une valeur lue.
-"""
-
-from __future__ import annotations
+"""Étape 4 : couche silver (tables typées, contrôles qualité et quarantaine)."""
 
 import io
 import re
@@ -30,8 +13,8 @@ from .config import S3Target
 from .parsing import parser_facture
 from .storage import s3_client
 
-MONTANT = pa.decimal128(12, 2)  # montants en euros : décimal exact, jamais de float
-TOLERANCE = Decimal("0.01")  # 1 centime d'écart toléré (arrondis)
+MONTANT = pa.decimal128(12, 2)
+TOLERANCE = Decimal("0.01")
 CHAMPS_OBLIGATOIRES = ["numero_facture", "fournisseur", "client", "date_emission",
                        "total_ht", "total_tva", "total_ttc"]
 
@@ -52,9 +35,9 @@ SCHEMA_FACTURES = pa.schema([
     ("total_tva", MONTANT),
     ("total_ttc", MONTANT),
     ("nb_lignes", pa.int32()),
-    ("statut_qualite", pa.string()),  # "valide" ou "signalee"
-    ("anomalies", pa.string()),  # liste des anomalies détectées, séparées par « ; »
-    ("sha256", pa.string()),  # lien vers la couche bronze (traçabilité)
+    ("statut_qualite", pa.string()),
+    ("anomalies", pa.string()),
+    ("sha256", pa.string()),
     ("fichier", pa.string()),
     ("methode_extraction", pa.string()),
 ])
@@ -90,7 +73,7 @@ def derniers_documents_ok() -> list[dict]:
 
 
 def motif_rejet(facture: dict) -> tuple[str, str] | None:
-    """Renvoie (motif, détail) si la facture est inexploitable, sinon None."""
+    """Renvoie le motif et le détail du rejet si la facture est inexploitable, sinon None."""
     manquants = [c for c in CHAMPS_OBLIGATOIRES if facture[c] is None]
     if manquants:
         return "champ_obligatoire_illisible", ", ".join(manquants)
@@ -104,19 +87,19 @@ def motif_rejet(facture: dict) -> tuple[str, str] | None:
 
 
 def anomalies(facture: dict) -> list[str]:
-    """Liste les incohérences d'une facture exploitable (montants, dates, identifiants)."""
+    """Liste les incohérences d'une facture (montants, dates, identifiants)."""
     pb = []
     somme_lignes = sum(l["total_ht"] for l in facture["lignes"])
     if abs(somme_lignes - facture["total_ht"]) > TOLERANCE:
-        pb.append(f"somme des lignes ({somme_lignes}) ≠ total HT ({facture['total_ht']})")
+        pb.append(f"somme des lignes ({somme_lignes}) différente du total HT ({facture['total_ht']})")
     if abs(facture["total_ht"] + facture["total_tva"] - facture["total_ttc"]) > TOLERANCE:
-        pb.append("total HT + TVA ≠ total TTC")
+        pb.append("total HT + TVA différent du total TTC")
     tva_attendue = sum(l["total_ht"] * l["taux_tva"] / 100 for l in facture["lignes"])
     if abs(tva_attendue - facture["total_tva"]) > TOLERANCE:
-        pb.append(f"TVA attendue {tva_attendue:.2f} ≠ TVA lue {facture['total_tva']}")
+        pb.append(f"TVA attendue {tva_attendue:.2f}, TVA lue {facture['total_tva']}")
     for i, l in enumerate(facture["lignes"], 1):
         if abs(l["quantite"] * l["prix_unitaire_ht"] - l["total_ht"]) > TOLERANCE:
-            pb.append(f"ligne {i} : quantité × prix unitaire ≠ total")
+            pb.append(f"ligne {i} : quantité x prix unitaire différent du total")
     if facture["date_echeance"] and facture["date_echeance"] < facture["date_emission"]:
         pb.append("date d'échéance antérieure à la date d'émission")
     for champ in ("fournisseur_siret", "client_siret"):
@@ -126,7 +109,7 @@ def anomalies(facture: dict) -> list[str]:
 
 
 def construire_silver() -> tuple[list[dict], list[dict], list[dict]]:
-    """Parse et contrôle tous les documents du bronze ; renvoie (factures, lignes, quarantaine)."""
+    """Parse et contrôle tous les documents du bronze, et renvoie les trois tables."""
     factures, lignes, quarantaine = [], [], []
     numeros_vus = {}
     maintenant = datetime.now(timezone.utc)
@@ -159,15 +142,15 @@ def construire_silver() -> tuple[list[dict], list[dict], list[dict]]:
 
 
 def ecrire_table(target: S3Target, nom: str, lignes: list[dict], schema: pa.Schema) -> None:
-    """Écrit (en remplaçant l'ancienne version) une table Parquet dans le bucket silver."""
+    """Écrit une table Parquet dans le bucket silver, en remplaçant l'ancienne version."""
     buffer = io.BytesIO()
     pq.write_table(pa.Table.from_pylist(lignes, schema=schema), buffer)
     s3_client(target).put_object(Bucket=target.bucket, Key=f"{nom}/{nom}.parquet", Body=buffer.getvalue())
-    print(f"→ s3://{target.bucket}/{nom}/{nom}.parquet ({len(lignes)} lignes)")
+    print(f"  s3://{target.bucket}/{nom}/{nom}.parquet ({len(lignes)} lignes)")
 
 
 def executer() -> dict:
-    """Construit la couche silver et l'écrit dans le bucket ; renvoie un résumé."""
+    """Construit la couche silver, l'écrit dans le bucket et renvoie un résumé."""
     factures, lignes, quarantaine = construire_silver()
     target = S3Target.from_env("SILVER")
     ecrire_table(target, "factures", factures, SCHEMA_FACTURES)

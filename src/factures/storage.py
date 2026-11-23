@@ -1,6 +1,4 @@
-"""Accès au stockage objet S3 (compatible Hyperfluid / MinIO / AWS)."""
-
-from __future__ import annotations
+"""Accès au stockage S3."""
 
 from collections.abc import Iterator
 
@@ -18,13 +16,12 @@ def s3_client(target: S3Target):
         aws_access_key_id=target.access_key,
         aws_secret_access_key=target.secret_key,
         region_name=target.region,
-        # Passerelle S3 hors AWS : adressage "chemin" (https://host/bucket/clé)
         config=Config(s3={"addressing_style": "path"}, retries={"max_attempts": 5}),
     )
 
 
 def list_objects(target: S3Target, prefix: str = "") -> Iterator[dict]:
-    """Liste tous les objets du bucket (gère la pagination au-delà de 1000)."""
+    """Liste tous les objets du bucket, page par page."""
     client = s3_client(target)
     paginator = client.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=target.bucket, Prefix=prefix):

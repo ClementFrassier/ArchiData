@@ -1,19 +1,7 @@
-"""Étape 5 — mesurer la qualité de l'OCR en comparant à une vérité terrain.
-
-La vérité terrain (evaluation/verite_terrain.csv) contient les valeurs exactes de
-20 factures scannées, vérifiées à la main sur l'image.
-
-Deux modes :
-- sans option     : on compare la couche silver actuelle (OCR à 1540 px) ;
-- --taille N      : on ré-OCRise l'échantillon avec une image de N px, on applique
-                    le même parseur, puis on compare (pour tester un autre réglage).
-"""
-
-from __future__ import annotations
+"""Étape 5 : mesure de la qualité de l'OCR par rapport à la vérité terrain."""
 
 import csv
 import io
-from pathlib import Path
 
 import pyarrow.parquet as pq
 
@@ -42,13 +30,13 @@ def depuis_silver() -> dict[str, dict]:
 
 
 def depuis_ocr(fichiers: list[str], taille: int) -> dict[str, dict]:
-    """OCRise les fichiers à la taille demandée (avec cache local) et les parse."""
+    """OCRise les fichiers à la taille demandée (résultats mis en cache) et les parse."""
     cache = DATA_DIR / "evaluation" / f"ocr_{taille}px"
     cache.mkdir(parents=True, exist_ok=True)
     resultats = {}
     for fichier in fichiers:
         chemin = cache / f"{fichier}.md"
-        if not chemin.exists():  # on ne refait pas l'OCR si on l'a déjà fait
+        if not chemin.exists():
             texte, duree = ocr_page(LANDING_DIR / fichier, 0, taille)
             chemin.write_text(texte)
             print(f"  OCR {taille}px {fichier} ({duree:.1f} s)")
@@ -63,8 +51,8 @@ def en_texte(valeur) -> str:
     return "" if valeur is None else str(valeur).strip()
 
 
-def evaluer(taille: int | None = None) -> list[dict]:
-    """Compare les valeurs extraites à la vérité terrain et renvoie la précision par champ."""
+def evaluer(taille: int | None = None) -> None:
+    """Compare les valeurs extraites à la vérité terrain et affiche la précision par champ."""
     verite = charger_verite()
     fichiers = [v["fichier"] for v in verite]
     extrait = depuis_silver() if taille is None else depuis_ocr(fichiers, taille)
@@ -88,13 +76,13 @@ def evaluer(taille: int | None = None) -> list[dict]:
         writer.writeheader()
         writer.writerows(resultats)
 
-    print(f"\nSource : {source} · {len(verite)} factures scannées\n")
+    print(f"\nSource : {source}, {len(verite)} factures scannées\n")
     print(f"{'champ':<26} {'corrects':>9} {'précision':>10}")
     for r in resultats:
         print(f"{r['champ']:<26} {r['corrects']:>4}/{r['total']:<4} {r['precision']:>9.1f}%")
     total = sum(r["corrects"] for r in resultats)
-    print(f"{'GLOBAL':<26} {total:>4}/{len(verite) * len(CHAMPS):<4} {100 * total / (len(verite) * len(CHAMPS)):>9.1f}%")
+    nb_valeurs = len(verite) * len(CHAMPS)
+    print(f"{'GLOBAL':<26} {total:>4}/{nb_valeurs:<4} {100 * total / nb_valeurs:>9.1f}%")
     for fichier, champ, attendu, lu in erreurs:
-        print(f"  ERREUR {fichier} · {champ} : attendu « {attendu} », lu « {lu} »")
+        print(f"  ERREUR {fichier}, {champ} : attendu « {attendu} », lu « {lu} »")
     print(f"\nRésultats écrits dans {sortie.relative_to(PROJECT_ROOT)}")
-    return resultats

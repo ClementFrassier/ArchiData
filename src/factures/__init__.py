@@ -1,21 +1,20 @@
-"""Pipeline factures : S3 → OCR → bronze → silver → entrepôt → MCP → agent."""
-
-from __future__ import annotations
+"""Pipeline factures : S3, OCR, bronze, silver, entrepôt, MCP et agent."""
 
 import argparse
+import sys
+import time
 from collections import Counter
+from pathlib import Path
 
 
 def _cmd_fetch(_args) -> None:
-    """Commande `factures fetch` : lance le téléchargement et affiche le bilan."""
+    """Commande `factures fetch` : télécharge les nouvelles factures et affiche le bilan."""
     from .fetch import fetch
 
-    print("Récupération des factures depuis S3…")
+    print("Récupération des factures depuis S3...")
     stats = fetch()
-    print(
-        f"{stats['vus']} PDF dans le bucket · {stats['telecharges']} téléchargés · "
-        f"{stats['deja_presents']} déjà présents"
-    )
+    print(f"{stats['vus']} PDF dans le bucket, {stats['telecharges']} téléchargés, "
+          f"{stats['deja_presents']} déjà présents")
 
 
 def _cmd_detect(_args) -> None:
@@ -33,8 +32,6 @@ def _cmd_detect(_args) -> None:
 
 def _cmd_ocr(args) -> None:
     """Commande `factures ocr` : envoie une page au modèle, affiche le texte et le temps."""
-    from pathlib import Path
-
     from .config import LANDING_DIR
     from .ocr import ocr_page
 
@@ -43,29 +40,33 @@ def _cmd_ocr(args) -> None:
         pdf = LANDING_DIR / args.fichier
     texte, duree = ocr_page(pdf, taille_max_px=args.taille)
     print(texte)
-    print(f"\n--- {pdf.name} · image {args.taille} px · {duree:.2f} s pour la page")
+    print(f"\n{pdf.name} : image de {args.taille} px, {duree:.2f} s pour la page")
+
+
+def _ingerer_bronze() -> dict:
+    """Lance l'ingestion dans la couche bronze et affiche le bilan."""
+    from .bronze import ingerer
+
+    print("Ingestion dans la couche bronze...")
+    stats = ingerer()
+    print(f"{stats['ok']} ingérés, {stats['erreurs']} en erreur (retentés au prochain lancement), "
+          f"{stats['ignores']} déjà ingérés")
+    return stats
 
 
 def _cmd_bronze(_args) -> None:
     """Commande `factures bronze` : ingère les nouveaux PDF dans la couche bronze."""
-    from .bronze import ingerer
-
-    print("Ingestion dans la couche bronze…")
-    stats = ingerer()
-    print(
-        f"{stats['ok']} ingérés · {stats['erreurs']} en erreur (retentés au prochain lancement) · "
-        f"{stats['ignores']} déjà ingérés"
-    )
+    _ingerer_bronze()
 
 
 def _cmd_silver(_args) -> None:
     """Commande `factures silver` : reconstruit la couche silver depuis le bronze."""
     from .silver import executer
 
-    print("Construction de la couche silver…")
+    print("Construction de la couche silver...")
     r = executer()
-    print(f"\n{r['valides']} factures valides · {len(r['signalees'])} signalées · "
-          f"{len(r['rejets'])} rejetées · {r['lignes']} lignes de facture")
+    print(f"\n{r['valides']} factures valides, {len(r['signalees'])} signalées, "
+          f"{len(r['rejets'])} rejetées, {r['lignes']} lignes de facture")
     for numero, pb in r["signalees"]:
         print(f"  SIGNALÉE {numero} : {pb}")
     for fichier, motif, detail in r["rejets"]:
@@ -73,7 +74,7 @@ def _cmd_silver(_args) -> None:
 
 
 def _cmd_evaluer(args) -> None:
-    """Commande `factures evaluer` : précision champ par champ face à la vérité terrain."""
+    """Commande `factures evaluer` : précision de l'OCR champ par champ."""
     from .evaluation import evaluer
 
     evaluer(args.taille)
@@ -87,7 +88,7 @@ def _cmd_sql(args) -> None:
 
 
 def _cmd_dbeaver(_args) -> None:
-    """Commande `factures dbeaver` : écrit le script SQL à coller dans DBeaver (avec les clés)."""
+    """Commande `factures dbeaver` : écrit le script SQL à exécuter dans DBeaver."""
     from .config import DATA_DIR
     from .entrepot import script_initialisation
 
@@ -98,42 +99,35 @@ def _cmd_dbeaver(_args) -> None:
 
 
 def _cmd_pipeline(_args) -> None:
-    """Commande `factures pipeline` : récupération → bronze → silver, en une seule commande."""
-    import sys
-    import time
-
+    """Commande `factures pipeline` : récupération, bronze puis silver ; code 1 s'il reste des erreurs."""
     debut = time.perf_counter()
     _cmd_fetch(None)
     print()
-    from .bronze import ingerer
-
-    print("Ingestion dans la couche bronze…")
-    stats = ingerer()
-    print(f"{stats['ok']} ingérés · {stats['erreurs']} en erreur · {stats['ignores']} déjà ingérés\n")
+    stats = _ingerer_bronze()
+    print()
     _cmd_silver(None)
     print(f"\nPipeline terminé en {time.perf_counter() - debut:.1f} s")
-    # Code de sortie non nul s'il reste des documents en erreur : le planificateur peut alerter
     sys.exit(1 if stats["erreurs"] else 0)
 
 
 def main() -> None:
-    """Point d'entrée : lit la sous-commande tapée (fetch, detect…) et l'exécute."""
+    """Lit la sous-commande tapée (fetch, detect...) et l'exécute."""
     parser = argparse.ArgumentParser(prog="factures", description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("fetch", help="Télécharger les nouvelles factures du bucket S3").set_defaults(func=_cmd_fetch)
-    sub.add_parser("detect", help="Classer chaque PDF : texte ou image (OCR)").set_defaults(func=_cmd_detect)
+    sub.add_parser("detect", help="Classer chaque PDF : texte ou image").set_defaults(func=_cmd_detect)
     p_ocr = sub.add_parser("ocr", help="Envoyer une page au modèle d'OCR et afficher le résultat")
-    p_ocr.add_argument("fichier", help="PDF à OCRiser (chemin ou nom dans data/landing/)")
-    p_ocr.add_argument("--taille", type=int, default=1540, help="côté le plus long de l'image en px")
+    p_ocr.add_argument("fichier", help="PDF à traiter (chemin ou nom dans data/landing/)")
+    p_ocr.add_argument("--taille", type=int, default=1540, help="côté le plus long de l'image en pixels")
     p_ocr.set_defaults(func=_cmd_ocr)
     sub.add_parser("bronze", help="Ingérer les nouveaux PDF dans la couche bronze").set_defaults(func=_cmd_bronze)
-    sub.add_parser("silver", help="Construire la couche silver (tables typées + quarantaine)").set_defaults(func=_cmd_silver)
-    sub.add_parser("pipeline", help="Tout enchaîner : récupération → bronze → silver").set_defaults(func=_cmd_pipeline)
-    p_eval = sub.add_parser("evaluer", help="Mesurer la qualité de l'OCR face à la vérité terrain")
+    sub.add_parser("silver", help="Construire la couche silver").set_defaults(func=_cmd_silver)
+    sub.add_parser("pipeline", help="Enchaîner récupération, bronze et silver").set_defaults(func=_cmd_pipeline)
+    p_eval = sub.add_parser("evaluer", help="Mesurer la qualité de l'OCR par rapport à la vérité terrain")
     p_eval.add_argument("--taille", type=int, default=None,
-                        help="ré-OCRiser l'échantillon à cette taille (px) au lieu de lire le silver")
+                        help="refaire l'OCR de l'échantillon à cette taille (pixels) au lieu de lire le silver")
     p_eval.set_defaults(func=_cmd_evaluer)
-    p_sql = sub.add_parser("sql", help="Exécuter une requête SQL sur l'entrepôt (bronze / silver)")
+    p_sql = sub.add_parser("sql", help="Exécuter une requête SQL sur l'entrepôt")
     p_sql.add_argument("requete", help='ex. "SELECT count(*) FROM silver.factures"')
     p_sql.set_defaults(func=_cmd_sql)
     sub.add_parser("dbeaver", help="Générer le script d'initialisation pour DBeaver").set_defaults(func=_cmd_dbeaver)
