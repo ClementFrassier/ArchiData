@@ -18,3 +18,10 @@ __pycache__/
 # Divers
 *:Zone.Identifier
 .DS_Store
+
+# Documents personnels, hors rendu
+CONSIGNES.md
+11554.jpg
+demo.md
+image.png
+image-3.png
