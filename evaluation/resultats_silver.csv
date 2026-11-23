@@ -1,0 +1,17 @@
+champ,corrects,total,precision
+numero_facture,20,20,100.0
+fournisseur,20,20,100.0
+fournisseur_siret,20,20,100.0
+fournisseur_tva_intracom,20,20,100.0
+client,20,20,100.0
+client_siret,20,20,100.0
+date_emission,20,20,100.0
+date_echeance,20,20,100.0
+categorie,20,20,100.0
+statut_paiement,20,20,100.0
+mode_paiement,20,20,100.0
+iban,20,20,100.0
+total_ht,20,20,100.0
+total_tva,20,20,100.0
+total_ttc,20,20,100.0
+nb_lignes,20,20,100.0
