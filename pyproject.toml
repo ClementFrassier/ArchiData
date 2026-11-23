@@ -1,0 +1,26 @@
+[project]
+name = "factures"
+version = "0.1.0"
+description = "Pipeline factures : S3 → OCR → bronze → silver → DuckDB → serveur MCP → agent IA"
+authors = [
+    { name = "clement", email = "clement.frassier@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "boto3>=1.44.9",
+    "duckdb>=2.0.1",
+    "mcp[cli]>=2.3.0",
+    "openai>=3.57.0",
+    "pyarrow>=26.0.1",
+    "pymupdf>=2.1",
+    "python-dotenv>=1.2.4",
+]
+
+[project.scripts]
+factures = "factures:main"
+factures-mcp = "factures.mcp_server:main"
+factures-agent = "factures.agent:main"
+
+[build-system]
+requires = ["uv_build>=0.11.11,<0.12.0"]
+build-backend = "uv_build"

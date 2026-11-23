@@ -1,0 +1,20 @@
+# Secrets — ne JAMAIS committer
+.env
+*.env
+!.env.example
+
+# Données locales (zone d'arrivée, caches, bases)
+data/
+*.duckdb
+*.duckdb.wal
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Divers
+*:Zone.Identifier
+.DS_Store
